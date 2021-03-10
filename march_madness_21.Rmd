@@ -8,9 +8,9 @@ output: html_document
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(viridis)
-library(KMsurv)
-library(survival)
-library(survminer)
+library(caret)
+library(xgboost)
+library(MLmetrics)
 
 knitr::opts_chunk$set(
 	echo = TRUE,
@@ -27,3 +27,110 @@ scale_colour_discrete = scale_colour_viridis_d
 scale_fill_discrete = scale_fill_viridis_d
 theme_set(theme_minimal() + theme(legend.position = "bottom"))
 ```
+
+# Load in data
+```{r}
+teams = read_csv("./data/MTeams.csv")
+seasons = read_csv("./data/MSeasons.csv")
+seeds = read_csv("./data/MNCAATourneySeeds.csv")
+season_results = read_csv("./data/MRegularSeasonDetailedResults.csv") %>% 
+  janitor::clean_names()
+tourney_results = read_csv("./data/MNCAATourneyDetailedResults.csv")
+example_sub = read_csv("./data/MSampleSubmissionStage1.csv")
+```
+
+# Data Prep
+## Build simple training data
+Get results of all matchups each season
+```{r}
+season_matchups = season_results %>% 
+  mutate(
+    # if lower id team won, result = 1
+    result = if_else(w_team_id < l_team_id, 1, 0),
+    team1_id = if_else(w_team_id < l_team_id, w_team_id, l_team_id),
+    team2_id = if_else(w_team_id < l_team_id, l_team_id, w_team_id),
+    matchup = str_c(season, "_", team1_id, "_", team2_id)
+  ) %>% 
+  select(season, matchup, team1_id, team2_id, result)
+```
+
+Get season stats for each team (OR and DR)
+```{r}
+# Stats for teams that won each matchup
+season_team_stats_w = season_results %>% 
+  select(season, w_team_id, wdr, wor) %>% 
+  rename(
+    team_id = w_team_id,
+    dr = wdr,
+    or = wor
+  )
+
+# Stats for teams that lost each matchup
+season_team_stats_l = season_results %>% 
+  select(season, l_team_id, ldr, lor) %>% 
+  rename(
+    team_id = l_team_id,
+    dr = ldr,
+    or = lor
+  )
+
+# Stack both above to get season averages per team for OR and DR
+season_team_reb_avg = bind_rows(season_team_stats_w, season_team_stats_l) %>% 
+  group_by(season, team_id) %>% 
+  summarize(
+    avg_or = mean(or),
+    avg_dr = mean(dr)
+  )
+```
+
+Split data into train and test
+```{r}
+data = season_matchups %>% 
+  # Join in data for team 1
+  left_join(., season_team_reb_avg, by = c("season", "team1_id" = "team_id")) %>% 
+  rename(
+    team1_avg_or = avg_or,
+    team1_avg_dr = avg_dr
+  ) %>% 
+  # Join in data for team 2
+  left_join(., season_team_reb_avg, by = c("season", "team2_id" = "team_id") ) %>% 
+  rename(
+    team2_avg_or = avg_or,
+    team2_avg_dr = avg_dr
+  ) %>% 
+  mutate(
+    result = as_factor(result)
+  )
+
+# Set seed
+set.seed(369)
+
+# Train index (80% Train, 20% Test)
+train_index = createDataPartition(data$result, p = 0.8, list = FALSE, times = 1)
+
+# Get test and train data
+train = data[train_index,]
+test = data[-train_index,]
+```
+
+# Logistic regression
+```{r}
+# Model
+log_reg = glm(result ~ team1_avg_or + team2_avg_or + team1_avg_dr + team2_avg_dr, data = train, family = binomial(logit))
+
+# Summary of model
+summary(log_reg)
+
+# Predictions
+predictions = predict(log_reg, test, type = "response")
+
+# logloss
+logloss = LogLoss(y_pred = predictions, y_true = test$result)
+```
+
+
+
+
+
+
+
